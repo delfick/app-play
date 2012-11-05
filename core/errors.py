@@ -44,9 +44,13 @@ class DeveloperError(Exception):
 
         return message
 
-    def extra_message(self):
+    def extra_message(self, kwargs=None, exclude='origin'):
         """Default extra message just adds on all the kwargs"""
-        return '\n'.join("{}='{}'".format(k, v) for k, v in sorted(self.kwargs.items()) if k != 'origin')
+        if isinstance(exclude, basestring):
+            exclude = [exclude]
+        if kwargs is None:
+            kwargs = self.kwargs
+        return '\n'.join("{}='{}'".format(k, v) for k, v in sorted(self.kwargs.items()) if k not in exclude)
 
 class RequirementError(DeveloperError):
     path_desc = "requires"
@@ -73,18 +77,20 @@ class RequirementError(DeveloperError):
 
     def extra_message(self):
         values = self.clean_attrs()
-        return dedent("""
+        first = dedent("""
             {path_desc}='{path}'
             base='{base}'
             found='{found}'
             identity='{identity}'
             """.format(**values)
             )
+        others = super(RequirementError, self).extra_message(exclude=('path', 'base', 'found', 'identity', 'origin'))
+        return "{}{}".format(first, others)
 
 class RequirementAttributeError(RequirementError):
     def extra_message(self):
         values = self.clean_attrs()
-        return dedent("""
+        first = dedent("""
             {path_desc}='{path}'
             obj='{obj}'
             requires_obj_attribute='{requires}'
@@ -92,3 +98,5 @@ class RequirementAttributeError(RequirementError):
             identity='{identity}'
             """.format(**values)
             )
+        others = super(RequirementError, self).extra_message(exclude=('path', 'obj', 'requires', 'found', 'identity', 'origin'))
+        return "{}{}".format(first, others)

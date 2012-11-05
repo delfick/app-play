@@ -17,7 +17,9 @@ def parse_app_spec(handler):
     def parser(name, bases, attrs):
         factory = handler(name, bases)
         factory.update(attrs)
-        return type(name, bases, attrs)
+        created = type(name, bases, attrs)
+        factory.post_creation(created, name, bases, attrs)
+        return created
     return parser
 
 class SpecHandler(object):
@@ -38,7 +40,6 @@ class SpecHandler(object):
         self.ensure_bookkeeper(attrs)
 
         # Get handlers for special declarations
-        known_creators = self.find_handlers(prefix="create_")
         known_declarations = self.find_handlers(prefix="make_")
 
         # Get the delarations in the attrs
@@ -47,9 +48,7 @@ class SpecHandler(object):
         declaration_name_map = {dec.lower():dec for dec in declarations}
 
         # Determine which declarations aren't known
-        special_declarations = {key:declarations[key] for key, val in declaration_objs.items()
-            if key.lower() not in known_creators and key.lower() not in known_declarations
-            }
+        special_declarations = {key:declarations[key] for key, val in declaration_objs.items() if key.lower() not in known_declarations}
 
         # Understood declaration blocks
         for name, spec, handler in self.declarations_for_handlers(known_declarations, declarations, declaration_name_map):
@@ -59,9 +58,22 @@ class SpecHandler(object):
         for name, spec in sorted(special_declarations.items()):
             self.handle_unknown(name, spec, attrs)
 
-        # Creators Declarations
-        for name, spec, handler in self.declarations_for_handlers(known_creators, declarations, declaration_name_map):
-            self.handle_known(name, spec, handler, attrs)
+    def post_creation(self, created, name, bases, attrs):
+        """Record any attributes this class manually replaced"""
+        bookkeeper = created.__bookkeeper__
+        manually_replaced = []
+
+        for base in self.bases:
+            if hasattr(base, '__bookkeeper__'):
+                added = base.__bookkeeper__.added
+                for attr in added:
+                    if attr in attrs and attr not in self.added:
+                        manually_replaced.append(attr)
+
+        if manually_replaced:
+            bookkeeper.replaced_attrs(manually_replaced, created)
+
+        bookkeeper.normalise_attr_record()
 
     ########################
     ###   HANDLERS
@@ -74,7 +86,7 @@ class SpecHandler(object):
         """
         nullable = self.is_nullable(handler)
         extendable = self.is_extendable(handler)
-        inherited = self.find_inherited(name, spec, attrs, extendable=extendable, nullable=nullable)
+        inherited = self.find_inherited(name, spec, attrs, extendable=extendable, nullable=nullable, force=True)
         attributes = handler(name, spec, inherited, attrs)
         self.handle_attributes(name, attributes, inherited, attrs)
 
@@ -85,11 +97,14 @@ class SpecHandler(object):
             and add as the name of the declaration, lowered, as a new attribute
         """
         inherited = self.find_inherited(name, spec, attrs)
-        instance = self.generate_thing(name, spec, inherited, attrs)
-        attributes = {name.lower():instance}
-        self.handle_attributes(name, attributes, inherited, attrs)
+        attributes = self.combine_dicts(inherited, spec)
+        kls = attributes.get("__main__")
 
-    def handle_attributes(self, name, attributes, inherited, attrs):
+        kwargs = self.attributes_from(attributes)
+        attributes = {name.lower():(name, kls, kwargs)}
+        self.handle_attributes(name, attributes, None, attrs, bookkeeper_method="add_custom")
+
+    def handle_attributes(self, name, attributes, inherited, attrs, bookkeeper_method=None):
         """
             Add new attributes to attrs
             Make sure there are no conflicts
@@ -97,8 +112,12 @@ class SpecHandler(object):
         """
         if attributes:
             self.complain_about_conflicts(name, attributes, attrs)
-            attrs.update(attributes)
             self.add_sanity_checks(attrs, attributes, attrs[name])
+            if bookkeeper_method:
+                self.add_to_bookkeeper(name, attributes, inherited, attrs, bookkeeper_method=bookkeeper_method)
+            else:
+                attrs.update(attributes)
+                self.bookkeeper(attrs).added_attributes({key:attrs[name] for key in attributes}, origin=attrs[name])
 
     ########################
     ###   FINDERS
@@ -124,7 +143,7 @@ class SpecHandler(object):
                 known[name] = handler
         return known
 
-    def find_inherited(self, name, attributes, attrs, extendable=True, nullable=True):
+    def find_inherited(self, name, attributes, attrs, extendable=True, nullable=True, force=False):
         """
             Find any inherited values from self.bases
             Complain if using __extend__ or __nullify_inherited__ if need be
@@ -147,7 +166,7 @@ class SpecHandler(object):
                 )
             raise DeveloperError(message, origin=attrs[name])
 
-        if attributes.get('__extend__', True):
+        if attributes.get('__extend__', True) or force:
             for base in self.bases:
                 if hasattr(base, name):
                     inherited.update(vars(getattr(base, name)))
@@ -190,10 +209,11 @@ class SpecHandler(object):
         """Add sanity checks to attrs['__bookkeeper__']"""
         for key, val in added_attributes.items():
             if hasattr(val, '__uses__') and val.__uses__:
-                attrs['__bookkeeper__'].add_requirement(val.__uses__, key, origin)
+                self.bookkeeper(attrs).add_requirement(val.__uses__, key, origin)
 
     def replace_nulled_functions(self, attributes, inherited, origin):
         """Make empty functions for attributes that are defined as None"""
+        result = {}
         for key, val in attributes.items():
             if val is None:
                 # Value is none, make it empty
@@ -207,7 +227,8 @@ class SpecHandler(object):
                     return nothing_func
 
                 # Add the empty function
-                attributes[key] = make_empty()
+                result[key] = make_empty()
+        return result
 
     def ensure_bookkeeper(self, attrs):
         """
@@ -215,24 +236,59 @@ class SpecHandler(object):
             Look for bookkeeper_kls in attrs and on bases to see what type it should be
             default to core.bookkeeper.BookKeeper
         """
-        if '__bookkeepr__' in attrs:
-            return
+        if '__bookkeeper__' not in attrs:
+            kls = attrs.get('bookkeeper_kls')
+            if kls is None:
+                for base in self.bases:
+                    kls = getattr(base, 'bookkeeper_kls', None)
+                    if kls is not None:
+                        break
 
-        kls = attrs.get('bookkeeper_kls')
-        if kls is None:
-            for base in self.bases:
-                kls = getattr(base, 'bookkeeper_kls', None)
-                if kls is not None:
-                    break
+            if kls is None:
+                kls = BookKeeper
 
-        if kls is None:
-            kls = BookKeeper
-
-        attrs['__bookkeeper__'] = BookKeeper()
+            attrs['__bookkeeper__'] = BookKeeper()
+        return attrs['__bookkeeper__']
+    
+    # Alias for getting bookkeeper from attrs
+    bookkeeper = ensure_bookkeeper
 
     ########################
     ###   UTILITY
     ########################
+
+    def add_to_bookkeeper(self, name, spec, inherited, attrs, bookkeeper_method):
+        """Add spec to the bookkeeper"""
+        method = getattr(attrs['__bookkeeper__'], bookkeeper_method)
+        if inherited is None:
+            method(spec, attrs[name])
+        else:
+            method(
+                  {key.lower():val for key, val in spec.items() if not key.startswith("_")}
+                , inherited
+                , extend = spec.get("__extend__", True)
+                , origin = attrs[name]
+                )
+
+    def copy_attributes_to_instance(self, name, spec, inherited, attrs, generate_method=None):
+        """Just copy the attributes from the delaration onto the class"""
+        attributes = self.nulls_if_necessary(spec, inherited)
+        self.bookkeeper(attrs).removed_attributes(attributes, origin=attrs[name])
+
+        if not generate_method:
+            self.attributes_from(spec)
+        else:
+            for identity, thing in spec.items():
+                if not identity.startswith("_"):
+                    if thing is None:
+                        attributes[identity] = path
+                    else:
+                        attributes[identity] = generate_method(identity, thing, name, attrs)
+
+        replaced = self.replace_nulled_functions(attributes, inherited, attrs[name])
+        attributes.update(replaced)
+        self.bookkeeper(attrs).removed_attributes(replaced, origin=attrs[name])
+        return attributes
 
     def declarations_for_handlers(self, handlers, declarations, name_map):
         """
@@ -255,8 +311,6 @@ class SpecHandler(object):
         attributes = {}
         for key, val in attrs.items():
             if not key.startswith("_"):
-                if isinstance(val, types.LambdaType) and val.__name__ == '<lambda>':
-                    val = val()
                 attributes[key] = val
         return attributes
 

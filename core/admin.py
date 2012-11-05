@@ -2,7 +2,7 @@ import collections
 import inspect
 
 from errors import RequirementError, RequirementAttributeError, DeveloperError, NotFound
-from introspection import find_obj
+from introspection import find_obj, iterate_bookkeepers, position_for
 
 class InstallRequirementError(RequirementError):
     path_desc = "installing"
@@ -16,6 +16,7 @@ class AppAdmin(object):
     """
     def __init__(self, app):
         self.app = app
+        self.app_kls = app.__class__
 
     ########################
     ###   USAGE
@@ -29,6 +30,7 @@ class AppAdmin(object):
         """
         if not hasattr(self.app, '__bookkeeper__'):
             raise DeveloperError("The app being bootstrap'd needs to have a __bookkeeper__ property")
+        self.create_things()
         self.sanity_check()
         self.install()
 
@@ -59,32 +61,30 @@ class AppAdmin(object):
             try:
                 obj = find_obj(app, installer)
             except NotFound as error:
-                raise InstallRequirementError(origin=origin, path=error.path, base=error.base, identity=key, found=error.found)
+                added_by = position_for(app.__bookkeeper__.find_adder(installer, app))
+                removed_by = position_for(app.__bookkeeper__.find_remover(installer, app))
+                error_args = dict(origin=origin, path=error.path, base=error.base, identity=key, found=error.found)
+                if added_by:
+                    error_args['added_by'] = added_by
+                if removed_by:
+                    error_args['removed_by'] = removed_by
+                raise InstallRequirementError(**error_args)
 
             # Make sure it has an install method
             if not hasattr(obj, 'install'):
                 raise InstallRequirementAttributeError(origin=origin, path=installer, obj=obj, identity=key, requires="install")
-            
+
             # And finally, call the installer
             obj.install(app)
+
+    def create_things(self):
+        """Get things from the bookkeeper that should be put onto the app"""
+        for attribute, value in self.app.__bookkeeper__.create_objects():
+            setattr(self.app, attribute, value)
 
     ########################
     ###   UTILITY
     ########################
-
-    def from_mro(self, key):
-        """
-            Look through mro for occurances of the key
-            Where key is a dot seperated path to something
-            so key=components.blah.install
-            Will find base.components.blah.install for all the bases in the mro for the app
-        """
-        installed = {}
-        for obj in inspect.getmro(self.app.__class__):
-            try:
-                yield find_obj(obj, key), obj
-            except NotFound:
-                pass
 
     @property
     def installers(self):
@@ -94,7 +94,7 @@ class AppAdmin(object):
             for only the first occurance of each installer identity
         """
         installed = []
-        for installers, base in self.from_mro("_installers"):
+        for installers, base in iterate_bookkeepers(self.app_kls, "installers"):
             if installers:
                 for key, installer in installers.items():
                     if key not in installed and not key.startswith("_"):
@@ -116,7 +116,7 @@ class AppAdmin(object):
             Making sure to only get the first requirement for each identity
         """
         found = []
-        for requirements, _ in self.from_mro('__bookkeeper__.requirements'):
+        for requirements, _ in iterate_bookkeepers(self.app_kls, "requirements"):
             if requirements:
                 for paths, identity, origin in requirements:
                     if identity not in found:

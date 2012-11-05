@@ -60,3 +60,35 @@ def find_obj(base, path):
         obj = getattr(obj, part)
         found.append(part)
     return obj
+
+def from_mro(base, key=None, not_self=False):
+    """
+        Look through mro for occurances of the key
+        Where key is a dot seperated path to something
+        so key=components.blah.install
+        Will find base.components.blah.install for all the bases in the mro for the base provided
+    """
+    installed = {}
+    if base is type:
+        return
+
+    for obj in inspect.getmro(base):
+        if obj is base and not not_self:
+            continue
+
+        try:
+            if key:
+                yield find_obj(obj, key), obj
+            else:
+                yield obj
+        except NotFound:
+            pass
+
+def iterate_bookkeepers(base, key=None):
+    """Look through all bookkeepers of base provided"""
+    find = "__bookkeeper__"
+    if key:
+        find = "{}.{}".format(find, key)
+
+    for info in from_mro(base, key=find):
+        yield info

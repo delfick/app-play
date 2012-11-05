@@ -14,49 +14,29 @@ class AppHandler(SpecHandler):
     ########################
 
     @not_extendable
-    def copy_attributes_to_instance(self, name, spec, inherited, attrs):
-        """Just copy the attributes from the delaration onto the class"""
-        attributes = self.nulls_if_necessary(spec, inherited)
-        attributes.update(self.attributes_from(spec))
-        self.replace_nulled_functions(attributes, inherited, attrs[name])
-        return attributes
-    make_attrs = copy_attributes_to_instance
-    make_bookkeeper = copy_attributes_to_instance
+    def make_bookkeeper(self, name, methods, inherited, attrs):
+        """Copy all bookkeeper stuff straight onto the class"""
+        return self.copy_attributes_to_instance(name, methods, inherited, attrs)
+
+    @not_extendable
+    def make_methods(self, name, methods, inherited, attrs):
+        """Create methods on the class that delegate to particular attributes"""
+        return self.copy_attributes_to_instance(name, methods, inherited, attrs, generate_method=self.generate_method_delegate)
+
+    @not_nullable
+    def make_attrs(self, name, spec, inherited, attrs):
+        """"Tell bookkeeper about attrs we want"""
+        self.add_to_bookkeeper(name, spec, inherited, attrs, bookkeeper_method="add_attrs")
 
     @not_nullable
     def make_install(self, name, spec, inherited, attrs):
         """Determine what needs to be installed on the instance"""
-        attributes = {'_installers' : {key:val for key, val in spec.items() if not key.startswith("_")}}
-        attributes['_installers']['__extend__'] = spec.get("__extend__", True)
-        return attributes
+        self.add_to_bookkeeper(name, spec, inherited, attrs, bookkeeper_method="add_installers")
 
     @not_nullable
     def make_components(self, name, spec, inherited, attrs):
-        """"Create instance of defined components to be put on the class""" 
-        values = spec
-        if spec.get("__extends__", True):
-            values = self.combine_dicts(inherited, spec)
-
-        for key, kls in values.items():
-            if not key.startswith("_"):
-                if kls is not None and isinstance(kls, collections.Callable):
-                    values[key] = kls()
-
-        identity = name.lower()
-        return {name.lower():type(identity, (object, ), values)}
-
-    @not_extendable
-    def create_methods(self, name, methods, inherited, attrs):
-        """Create methods on the class that delegate to particular attributes"""
-        attributes = self.nulls_if_necessary(methods, inherited)
-        for ident, path in methods.items():
-            if not ident.startswith("_"):
-                if path is None:
-                    attributes[ident] = path
-                else:
-                    attributes[ident] = self.generate_method_delegate(ident, path, name, attrs)
-        self.replace_nulled_functions(attributes, inherited, attrs[name])
-        return attributes
+        """"Tell bookkeeper about components we want"""
+        self.add_to_bookkeeper(name, spec, inherited, attrs, bookkeeper_method="add_components")
 
     ########################
     ###   GENERATORS
@@ -83,28 +63,3 @@ class AppHandler(SpecHandler):
 
         # Return our delegate as a property
         return property(getter, setter)
-
-    def generate_thing(self, name, spec, inherited, attrs):
-        """Create an object from a single spec"""
-        values = spec
-        if spec.get("__extends__", True):
-            values = self.combine_dicts(inherited, spec)
-
-        if '__main__' not in spec:
-            raise DeveloperError("Component {} needs to have a __main__ variable".format(name))
-
-        kls = spec['__main__']
-        kwargs = self.attributes_from(values)
-
-        try:
-            return kls(**kwargs)
-        except Exception as error:
-            import traceback
-            error = "\n{}".format('\n'.join("\t{}".format(line) for line in dedent(traceback.format_exc()).split('\n')))
-            raise DeveloperError("Failed to create custom object '{}'.".format(name)
-                , error = error
-                , origin = attrs[name]
-                , calling = position_for(kls.__init__)
-                , calling_with = kwargs
-                , callee_signature = inspect.getargspec(kls.__init__)
-                )
