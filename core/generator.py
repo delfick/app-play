@@ -2,6 +2,7 @@ from textwrap import dedent
 import types
 
 from errors import DeveloperError, RequirementError
+from introspection import from_mro
 from bookkeeper import BookKeeper
 
 class DelegateRequirementError(RequirementError):
@@ -30,6 +31,7 @@ class SpecHandler(object):
     def __init__(self, name, bases):
         self.name = name
         self.bases = bases
+        self.reversed_bases = [bases[index] for index in range(len(bases)-1, -1, -1)]
 
     ########################
     ###   USAGE
@@ -62,17 +64,21 @@ class SpecHandler(object):
         """Record any attributes this class manually replaced"""
         bookkeeper = created.__bookkeeper__
         manually_replaced = []
-
-        for base in self.bases:
+        for base in from_mro(created):
+            on_base = [key for key in base.__dict__.keys() if not key.startswith("_")]
             if hasattr(base, '__bookkeeper__'):
-                added = base.__bookkeeper__.added
-                for attr in added:
-                    if attr in attrs and attr not in self.added:
+                on_base.extend(base.__bookkeeper__.added_keys)
+
+            for attr in on_base:
+                if attr in attrs and attr not in bookkeeper.added:
+                    if not self.is_declaration(attrs[attr]):
                         manually_replaced.append(attr)
 
         if manually_replaced:
-            bookkeeper.replaced_attrs(manually_replaced, created)
+            # Record the replaced attrs
+            bookkeeper.replaced_attributes(manually_replaced, created)
 
+        # Make sure everything makes sense
         bookkeeper.normalise_attr_record()
 
     ########################
@@ -97,12 +103,15 @@ class SpecHandler(object):
             and add as the name of the declaration, lowered, as a new attribute
         """
         inherited = self.find_inherited(name, spec, attrs)
-        attributes = self.combine_dicts(inherited, spec)
-        kls = attributes.get("__main__")
 
+        attributes = spec
+        if attributes.get("__extend__", True):
+            attributes = self.combine_dicts(inherited, spec)
+
+        kls = attributes.get("__main__")
         kwargs = self.attributes_from(attributes)
-        attributes = {name.lower():(name, kls, kwargs)}
-        self.handle_attributes(name, attributes, None, attrs, bookkeeper_method="add_custom")
+
+        self.handle_attributes(name, {name.lower():(name, kls, kwargs)}, None, attrs, bookkeeper_method="add_custom")
 
     def handle_attributes(self, name, attributes, inherited, attrs, bookkeeper_method=None):
         """
@@ -117,7 +126,11 @@ class SpecHandler(object):
                 self.add_to_bookkeeper(name, attributes, inherited, attrs, bookkeeper_method=bookkeeper_method)
             else:
                 attrs.update(attributes)
-                self.bookkeeper(attrs).added_attributes({key:attrs[name] for key in attributes}, origin=attrs[name])
+
+                added_keys = [key for key in attributes if attributes[key] is not None]
+                removed_keys = [key for key in attributes if attributes[key] is None]
+                self.bookkeeper(attrs).added_attributes(added_keys, origin=attrs[name])
+                self.bookkeeper(attrs).removed_attributes(removed_keys, origin=attrs[name])
 
     ########################
     ###   FINDERS
@@ -167,7 +180,7 @@ class SpecHandler(object):
             raise DeveloperError(message, origin=attrs[name])
 
         if attributes.get('__extend__', True) or force:
-            for base in self.bases:
+            for base in self.reversed_bases:
                 if hasattr(base, name):
                     inherited.update(vars(getattr(base, name)))
         return inherited
@@ -247,7 +260,7 @@ class SpecHandler(object):
             if kls is None:
                 kls = BookKeeper
 
-            attrs['__bookkeeper__'] = BookKeeper()
+            attrs['__bookkeeper__'] = BookKeeper(self.name)
         return attrs['__bookkeeper__']
     
     # Alias for getting bookkeeper from attrs
@@ -257,37 +270,43 @@ class SpecHandler(object):
     ###   UTILITY
     ########################
 
-    def add_to_bookkeeper(self, name, spec, inherited, attrs, bookkeeper_method):
+    def add_to_bookkeeper(self, name, spec, inherited, attrs, bookkeeper_method, extendable=True):
         """Add spec to the bookkeeper"""
         method = getattr(attrs['__bookkeeper__'], bookkeeper_method)
-        if inherited is None:
-            method(spec, attrs[name])
-        else:
-            method(
-                  {key.lower():val for key, val in spec.items() if not key.startswith("_")}
-                , inherited
-                , extend = spec.get("__extend__", True)
-                , origin = attrs[name]
-                )
+        extend = extendable and spec.get("__extend__", True)
+        method(
+              {key.lower():val for key, val in spec.items() if not key.startswith("_")}
+            , inherited
+            , extend = extend
+            , origin = attrs[name]
+            )
 
-    def copy_attributes_to_instance(self, name, spec, inherited, attrs, generate_method=None):
+    def copy_attributes_to_instance(self, name, spec, inherited, attrs, generate_method=None, bookkeeper_method=None):
         """Just copy the attributes from the delaration onto the class"""
         attributes = self.nulls_if_necessary(spec, inherited)
-        self.bookkeeper(attrs).removed_attributes(attributes, origin=attrs[name])
 
         if not generate_method:
-            self.attributes_from(spec)
+            attributes.update(self.attributes_from(spec))
         else:
             for identity, thing in spec.items():
                 if not identity.startswith("_"):
                     if thing is None:
-                        attributes[identity] = path
+                        attributes[identity] = thing
                     else:
                         attributes[identity] = generate_method(identity, thing, name, attrs)
 
         replaced = self.replace_nulled_functions(attributes, inherited, attrs[name])
         attributes.update(replaced)
         self.bookkeeper(attrs).removed_attributes(replaced, origin=attrs[name])
+
+        if bookkeeper_method:
+            self.add_to_bookkeeper(name, attributes, inherited, attrs, bookkeeper_method=bookkeeper_method, extendable=False)
+        else:
+            added = [key for key in attributes if attributes[key] is not None]
+            removed = [key for key in attributes if attributes[key] is None]
+            self.bookkeeper(attrs).added_attributes(added, origin=attrs[name])
+            self.bookkeeper(attrs).removed_attributes(removed, origin=attrs[name])
+
         return attributes
 
     def declarations_for_handlers(self, handlers, declarations, name_map):

@@ -1,36 +1,148 @@
 from textwrap import dedent
+import logging
 import inspect
+import types
 
-from errors import RequirementError, NotFound, DeveloperError
+from errors import RequirementError, NotFound, DeveloperError, UnexpectedValueError
 from introspection import find_obj, position_for, from_mro
+
+class Unknown(object): pass
 
 class BookKeeper(object):
     """
         Object for keeping track of what is defined on an app
     """
-    def __init__(self):
+    def __init__(self, name):
+        self.name = name
+
         self.added = {}
+        self.values = {}
         self.removed = {}
         self.replaced = {}
 
         self.attrs = {}
         self.custom = {}
+        self.methods = {}
+        self.checkers = {}
         self.components = {}
         self.installers = {}
         self.requirements = []
 
-    def update(self, updating, attributes, inherited, extend=True, origin=None, prefix=None):
+        self.log = logging.getLogger("{}:BookKeeper".format(name))
+
+    def value_for(self, identity, origin):
+        """Attempt to guess a value for some attribute given it's origin"""
+        if not hasattr(origin, '__name__'):
+            return Unknown
+
+        name = origin.__name__.lower()
+        values = getattr(self, name, None)
+        if not values or identity not in values:
+            return Unknown
+
+        return values[identity]
+
+    def debug(self, msg, **kwargs):
+        origin = kwargs.get('origin')
+        if 'origin' in kwargs:
+            del kwargs['origin']
+        origin = "{}:{}({})".format(self.name, origin.__name__, position_for(origin, with_repr=False))
+
+        template = "\t".join("{}=%s".format(key) for key in sorted(kwargs.keys()))
+        values = [msg, origin] + [v for _, v in sorted(kwargs.items())]
+        self.log.debug("%s\torigin=%s\t{}".format(template), *values)
+
+    def UnexpectedValueError(self, identity, app, msg=None):
+        """Return an exception that can be raised to announce an unexpected value"""
+        if msg is None:
+            msg = "Unexpected value"
+
+        error_args = dict(identity=identity, app=app)
+        error_args.update(self.paper_trail(identity, app))
+        return UnexpectedValueError(msg, **error_args)
+
+    def paper_trail(self, identity, app):
+        """Return where something is added and removed by"""
+        added_by = self.find_adder(identity, app)
+        removed_by = self.find_remover(identity, app)
+        return dict(added_by=added_by, removed_by=removed_by)
+
+    @property
+    def added_keys(self):
+        keys = []
+        for origin, attrs in self.added.items():
+            keys.extend(attrs)
+        return attrs
+
+    @property
+    def removed_keys(self):
+        keys = []
+        for origin, attrs in self.removed.items():
+            keys.extend(attrs)
+        return attrs
+
+    @property
+    def replaced_keys(self):
+        keys = []
+        for origin, attrs in self.replaced.items():
+            keys.extend(attrs)
+        return attrs
+
+    def update(self, updating, attributes, inherited
+        , extend=True, origin=None, prefix=None, everything_once_only=False, each_once_only=False, manually_update=False, store_with_origin=False):
         """Update one of the dictionaries"""
+        if not attributes:
+            return {}
+
+        if not inherited:
+            inherited = {}
+
+        if any(key.startswith("_") for key in attributes):
+            attributes = {key:val for key, val in attributes.items() if not key.startswith("_")}
+
+        if any(key.startswith("_") for key in inherited):
+            inherited = {key:val for key, val in inherited.items() if not key.startswith("_")}
+
+        debug_kwargs = {updating:attributes.keys(), 'origin':origin}
+        self.debug("Adding {}".format(updating), **debug_kwargs)
+
+        values = getattr(self, updating)
+        if everything_once_only and values:
+            raise DevelopeError("Adding '{}', but already have some".format(updating), origin=origin)
+
         if prefix:
-            inherited = {"{}.{}".format(prefix, key):None for key in inherited}
+            inherited = {"{}.{}".format(prefix, key):val for key, val in inherited.items()}
             attributes = {"{}.{}".format(prefix, key):val for key, val in attributes.items()}
 
-        if not extend:
-            self.removed_attributes(inherited.keys(), origin)
+        if each_once_only:
+            for key in attributes:
+                if key in values:
+                    raise DeveloperError("There can only be one {} with identity {}".format(updating, key), origin=origin)
 
-        conflict = set(updating.keys()) - set(attributes.keys())
+        added = [key for key in attributes if attributes[key] is not None]
+        removed = [key for key in attributes if attributes[key] is None]
+        if not extend:
+            removed.extend(key for key in inherited.keys() if key not in added and key not in removed)
+
+        conflict = set(attributes.keys()) - (set(attributes.keys()) - set(values.keys()))
         if conflict:
-            raise DevelopeError("Adding variable already added by the metaclass somewhere", origin=origin)
+            raise DeveloperError("Adding same variables ({}) to '{}' even though this bookkeeper has already added that".format(list(conflict), updating), origin=origin)
+
+        self.added_attributes(added, origin)
+        self.removed_attributes(removed, origin)
+
+        adding = attributes
+        if extend:
+            adding = {}
+            adding.update(inherited)
+            adding.update(attributes)
+
+        if not manually_update:
+            if store_with_origin:
+                values.update({key:(val, origin) for key, val in adding.items()})
+            else:
+                values.update(adding)
+        return adding
 
     def add_requirement(self, paths, identity, origin):
         """
@@ -38,63 +150,77 @@ class BookKeeper(object):
             identity requires all the things in paths to be installed
             and was defined by origin
         """
+        if not paths:
+            return
+
         if isinstance(paths, basestring):
             paths = [paths]
+
+        self.debug("Adding requirements", identity=identity, paths=paths)
         self.requirements.append((paths, identity, origin))
 
     def add_attrs(self, attrs, inherited, extend=True, origin=None):
         """Record attributes to add when bootstrapping the instance"""
-        self.added_attributes(attrs.keys(), origin)
-        self.update(self.attrs, attrs, inherited, extend=extend, origin=origin)
-        self.attrs.update(attrs)
+        self.update("attrs", attrs, inherited, extend=extend, origin=origin)
+
+    def add_methods(self, methods, inherited, extend=True, origin=None):
+        """Record methods that were added"""
+        self.update("methods", methods, inherited, extend=extend, origin=origin)
+
+    def add_checkers(self, checkers, inherited, extend=True, origin=None):
+        """Record checker methods that were added"""
+        self.update("checkers", checkers, inherited, extend=extend, origin=origin)
 
     def add_installers(self, installers, inherited, extend=True, origin=None):
         """Record things that require to be installed"""
-        if self.installers:
-            raise DevelopeError("Adding Installers, but already have some", origin=origin)
-        self.update(self.installers, installers, inherited, extend=extend, origin=origin)
-        self.installers.update(installers)
+        self.update('installers', installers, inherited, extend=extend, origin=origin, everything_once_only=True)
+
+    def add_custom(self, attributes, inherited, extend=True, origin=None):
+        """Record a custom object"""
+        self.update('custom', attributes, inherited, extend=extend, origin=origin, each_once_only=True, store_with_origin=True)
 
     def add_components(self, components, inherited, extend=True, origin=None):
         """Record components"""
-        self.added_attributes(["{}.{}".format("components", identity) for identity in components], origin)
-        self.update(self.components, components, inherited, extend=extend, origin=origin, prefix="components")
-
-        values = {}
-        if extend:
-            values.update(inherited)
-        values.update(components)
-
-        for identity, kls in values.items():
-            self.components["{}.{}".format("components", identity)] = ((identity, kls, {}), origin)
-
-    def add_custom(self, objects, origin=None):
-        """Record a custom object"""
-        self.added_attributes(objects.keys(), origin)
-        for identity, info in objects.items():
-            if identity in self.custom:
-                raise DevelopeError("Bookkeeper already has a custom class for {}".format(identity), origin=origin)
-            self.custom[identity] = (info, origin)
+        adding = self.update("components", components, inherited, extend=extend, origin=origin, prefix="components", manually_update=True)
+        for identity, kls in adding.items():
+            name = identity[len("components."):]
+            self.components[identity] = ((name, kls, {}), origin)
 
     def added_attributes(self, attributes, origin):
         """Record added attributes"""
+        if not attributes:
+            return
+
+        self.debug("Adding attrs", attributes=attributes, origin=origin)
         if origin not in self.added:
             self.added[origin] = []
+
         conflicts = set(self.added[origin]) - set(attributes)
         if conflicts:
             raise DevelopeError("Adding variable already added by the metaclass somewhere", origin=origin)
+
         self.added[origin].extend(attributes)
 
     def removed_attributes(self, attributes, origin):
         """Record removed attributes"""
+        if not attributes:
+            return
+
+        self.debug("Removing attrs", attributes=attributes, origin=origin)
         if origin not in self.removed:
             self.removed[origin] = []
+
         self.removed[origin].extend(attributes)
 
     def replaced_attributes(self, attributes, origin):
-        """Record replaced attributes"""
+        """Record replaced attrs"""
+        if not attributes:
+            return
+
+        self.debug("Replacing attrs", attributes=attributes, origin=origin)
         if origin not in self.replaced:
             self.replaced[origin] = []
+
         self.replaced[origin].extend(attributes)
 
     def normalise_attr_record(self):
@@ -168,6 +294,9 @@ class BookKeeper(object):
 
     def find_adder(self, identity, base):
         """Determine what in the mro added this particular attribute"""
+        if identity in base.__dict__ and base.__dict__[identity] is None:
+            return
+
         bookkeeper = getattr(base, '__bookkeeper__', None)
         if bookkeeper:
             added = {}
@@ -180,12 +309,12 @@ class BookKeeper(object):
                 for key in keys:
                     replaced[key] = origin
 
-            if identity in added:
+            if identity in added and bookkeeper.value_for(identity, added[identity]) is not None:
                 return added[identity]
-            if identity in replaced:
+            if identity in replaced and bookkeeper.value_for(identity, replaced[identity]) is not None:
                 return replaced[identity]
 
-        if identity in base.__dict__:
+        if identity in base.__dict__ and base.__dict__[identity] is not None:
             return base
 
         for parent in from_mro(base.__class__, not_self=True):
@@ -195,13 +324,30 @@ class BookKeeper(object):
 
     def find_remover(self, identity, base):
         """Determine what in the mro added this particular attribute"""
+        if identity in base.__dict__ and base.__dict__[identity] is None:
+            return base
+
         bookkeeper = getattr(base, '__bookkeeper__', None)
         if bookkeeper:
+            added = {}
+            for origin, keys in bookkeeper.added.items():
+                for key in keys:
+                    added[key] = origin
+
             removed = {}
             for origin, keys in bookkeeper.removed.items():
                 for key in keys:
                     removed[key] = origin
 
+            replaced = {}
+            for origin, keys in bookkeeper.replaced.items():
+                for key in keys:
+                    replaced[key] = origin
+
+            if identity in added and bookkeeper.value_for(identity, added[identity]) is None:
+                return added[identity]
+            if identity in replaced and bookkeeper.value_for(identity, replaced[identity]) is None:
+                return replaced[identity]
             if identity in removed:
                 return removed[identity]
 

@@ -52,6 +52,16 @@ class AppAdmin(object):
                 if isinstance(checker, collections.Callable) and getattr(checker, '__checker__', True):
                     checker()
 
+        # Make sure our methods point to callables
+        found = []
+        for methods, _ in iterate_bookkeepers(self.app_kls, 'methods'):
+            for identity in methods:
+                if identity not in found:
+                    found.append(identity)
+                    current = getattr(self.app, identity, None)
+                    if not isinstance(current, collections.Callable):
+                        raise self.app.__bookkeeper__.UnexpectedValueError(identity, self.app, "Expected to be a callable")
+
     def install(self):
         """Call the install method on anything that bootstrap says should be installed"""
         app = self.app
@@ -61,13 +71,8 @@ class AppAdmin(object):
             try:
                 obj = find_obj(app, installer)
             except NotFound as error:
-                added_by = position_for(app.__bookkeeper__.find_adder(installer, app))
-                removed_by = position_for(app.__bookkeeper__.find_remover(installer, app))
                 error_args = dict(origin=origin, path=error.path, base=error.base, identity=key, found=error.found)
-                if added_by:
-                    error_args['added_by'] = added_by
-                if removed_by:
-                    error_args['removed_by'] = removed_by
+                error_args.update(self.app.__bookkeeper__.paper_trail(installer, app))
                 raise InstallRequirementError(**error_args)
 
             # Make sure it has an install method
@@ -79,8 +84,12 @@ class AppAdmin(object):
 
     def create_things(self):
         """Get things from the bookkeeper that should be put onto the app"""
-        for attribute, value in self.app.__bookkeeper__.create_objects():
-            setattr(self.app, attribute, value)
+        created = []
+        for creator, _ in iterate_bookkeepers(self.app_kls, 'create_objects'):
+            for attribute, value in creator():
+                if attribute not in created:
+                    created.append(attribute)
+                    setattr(self.app, attribute, value)
 
     ########################
     ###   UTILITY

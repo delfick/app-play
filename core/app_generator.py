@@ -14,29 +14,40 @@ class AppHandler(SpecHandler):
     ########################
 
     @not_extendable
-    def make_bookkeeper(self, name, methods, inherited, attrs):
+    def make_checkers(self, name, methods, inherited, attrs):
         """Copy all bookkeeper stuff straight onto the class"""
-        return self.copy_attributes_to_instance(name, methods, inherited, attrs)
+        return self.copy_attributes_to_instance(name, methods, inherited, attrs
+            , bookkeeper_method="add_checkers"
+            )
 
     @not_extendable
     def make_methods(self, name, methods, inherited, attrs):
         """Create methods on the class that delegate to particular attributes"""
-        return self.copy_attributes_to_instance(name, methods, inherited, attrs, generate_method=self.generate_method_delegate)
+        return self.copy_attributes_to_instance(name, methods, inherited, attrs
+            , generate_method=self.generate_method_delegate
+            , bookkeeper_method="add_methods"
+            )
 
     @not_nullable
     def make_attrs(self, name, spec, inherited, attrs):
         """"Tell bookkeeper about attrs we want"""
-        self.add_to_bookkeeper(name, spec, inherited, attrs, bookkeeper_method="add_attrs")
+        self.add_to_bookkeeper(name, spec, inherited, attrs
+            , bookkeeper_method="add_attrs"
+            )
 
     @not_nullable
     def make_install(self, name, spec, inherited, attrs):
         """Determine what needs to be installed on the instance"""
-        self.add_to_bookkeeper(name, spec, inherited, attrs, bookkeeper_method="add_installers")
+        self.add_to_bookkeeper(name, spec, inherited, attrs
+            , bookkeeper_method="add_installers"
+            )
 
     @not_nullable
     def make_components(self, name, spec, inherited, attrs):
         """"Tell bookkeeper about components we want"""
-        self.add_to_bookkeeper(name, spec, inherited, attrs, bookkeeper_method="add_components")
+        self.add_to_bookkeeper(name, spec, inherited, attrs
+            , bookkeeper_method="add_components"
+            )
 
     ########################
     ###   GENERATORS

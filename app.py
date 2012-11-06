@@ -4,7 +4,6 @@ from functools import wraps
 from textwrap import dedent
 import collections
 import inspect
-import logging
 import types
 import copy
 import os
@@ -64,7 +63,7 @@ class App(BaseApp):
     class Attrs:
         one = 1
 
-    class BookKeeper:
+    class Checkers:
         def check_one(self):
             assert self.one == 1
 
@@ -87,6 +86,7 @@ class App(BaseApp):
 
 class DifferentApp(App):
     __metaclass__ = parse_app_spec(AppHandler)
+    runner = None
 
     class Strategy:
         __main__ = Utility
@@ -101,9 +101,7 @@ class DifferentApp(App):
         __location__ = whereami()
 
 class BetterApp(DifferentApp):
+    __metaclass__ = parse_app_spec(AppHandler)
     @Uses("components.blah")
     def action(self, blah):
         print 'joy to the world! : {}'.format(blah)
-
-if __name__ == '__main__':
-    BetterApp().execute()

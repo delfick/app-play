@@ -29,16 +29,25 @@ def location_of(thing):
                 pass
     return location, number
 
-def position_for(thing):
+def position_for(thing, with_repr=True):
     """Get a human readable string for location and filenumber of thing passed in"""
     if thing is None:
-        return "Unknown"
+        if with_repr:
+            return "Unknown"
+        else:
+            return ""
 
     location, number = location_of(thing)
     if location is None:
-        return repr(thing)
+        if with_repr:
+            return repr(thing)
+        else:
+            return ""
 
-    base = "{} at {}".format(repr(thing), location)
+    base = location
+    if with_repr:
+        base = "{} at {}".format(repr(thing), location)
+
     if number is None:
         return base
     else:
